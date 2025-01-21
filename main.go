@@ -3,11 +3,12 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"log"
-	"net/http"
 	"os"
+	"os/signal"
+	"syscall"
 
+	"github.com/streadway/amqp"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
@@ -18,7 +19,8 @@ var collection *mongo.Collection
 
 // ResourceData é a estrutura do JSON que será recebida e armazenada
 type ResourceData struct {
-	Data string `json:"data"`
+	SensorID string                 `json:"sensor_id"`
+	Data     map[string]interface{} `json:"data"`
 }
 
 func main() {
@@ -27,106 +29,92 @@ func main() {
 	if err != nil {
 		log.Fatalf("Erro ao criar cliente MongoDB: %v", err)
 	}
-
-	// Conecta ao MongoDB
 	ctx := context.Background()
 	err = client.Connect(ctx)
 	if err != nil {
 		log.Fatalf("Erro ao conectar ao MongoDB: %v", err)
 	}
+	defer client.Disconnect(ctx)
 
 	// Verifica se a conexão está funcionando
 	err = client.Ping(ctx, readpref.Primary())
 	if err != nil {
-		log.Fatalf("Erro ao testar conexão com MongoDB: %v", err)
+		log.Fatalf("Erro ao verificar conexão com MongoDB: %v", err)
 	}
-
-	// Seleciona a coleção de sensores
+	log.Println("Conectado ao MongoDB com sucesso")
 	collection = client.Database("intercity").Collection("sensors")
 
-	// Configuração dos endpoints HTTP
-	http.HandleFunc("/api/", apiHandler)
-
-	// Inicia o servidor HTTP
-	port := "8080"
-	log.Printf("Servidor iniciado na porta %s", port)
-	log.Fatal(http.ListenAndServe(":"+port, nil))
-}
-
-// apiHandler manipula as rotas POST e GET
-func apiHandler(w http.ResponseWriter, r *http.Request) {
-	// Extrai o UUID do sensor da URL
-	UUID := r.URL.Path[len("/api/"):]
-	if UUID == "" {
-		http.Error(w, "UUID não fornecido", http.StatusBadRequest)
-		return
-	}
-
-	switch r.Method {
-	case http.MethodPost:
-		handlePostData(UUID, w, r)
-	case http.MethodGet:
-		handleGetData(UUID, w, r)
-	default:
-		http.Error(w, "Método não permitido", http.StatusMethodNotAllowed)
-	}
-}
-
-// handlePostData lida com o envio de dados dos sensores
-func handlePostData(uuid string, w http.ResponseWriter, r *http.Request) {
-	var data ResourceData
-
-	// Decodifica o JSON recebido
-	err := json.NewDecoder(r.Body).Decode(&data)
+	// Conecta ao RabbitMQ
+	rabbitMQURL := "amqp://guest:guest@rabbitmq:5672/"
+	conn, err := amqp.Dial(rabbitMQURL)
 	if err != nil {
-		http.Error(w, fmt.Sprintf("Erro ao decodificar JSON: %v", err), http.StatusBadRequest)
-		return
+		log.Fatalf("Erro ao conectar ao RabbitMQ: %v", err)
 	}
+	defer conn.Close()
+	log.Println("Conectado ao RabbitMQ com sucesso")
 
-	// Insere os dados no MongoDB
-	_, err = collection.InsertOne(context.Background(), bson.M{
-		"sensor_id": uuid,
-		"data":      data.Data,
-	})
+	// Cria um canal no RabbitMQ
+	ch, err := conn.Channel()
 	if err != nil {
-		http.Error(w, fmt.Sprintf("Erro ao inserir dados no MongoDB: %v", err), http.StatusInternalServerError)
-		return
+		log.Fatalf("Erro ao abrir um canal no RabbitMQ: %v", err)
 	}
+	defer ch.Close()
 
-	// Responde com sucesso
-	w.WriteHeader(http.StatusCreated)
-	w.Write([]byte("Dados do sensor armazenados com sucesso"))
-}
-
-// handleGetData lida com a consulta dos dados do sensor
-func handleGetData(uuid string, w http.ResponseWriter, r *http.Request) {
-	// Consulta os dados do MongoDB para o sensor especificado
-	cursor, err := collection.Find(context.Background(), bson.M{"sensor_id": uuid})
+	// Declara a fila de mensagens (tópico)
+	queueName := "data_stream"
+	_, err = ch.QueueDeclare(
+		queueName, // nome da fila
+		true,      // durável
+		false,     // auto-delete
+		false,     // exclusivo
+		false,     // no-wait
+		nil,       // argumentos
+	)
 	if err != nil {
-		http.Error(w, fmt.Sprintf("Erro ao consultar dados no MongoDB: %v", err), http.StatusInternalServerError)
-		return
+		log.Fatalf("Erro ao declarar a fila no RabbitMQ: %v", err)
 	}
-	defer cursor.Close(context.Background())
 
-	var results []ResourceData
-	for cursor.Next(context.Background()) {
-		var result ResourceData
-		err := cursor.Decode(&result)
-		if err != nil {
-			http.Error(w, fmt.Sprintf("Erro ao decodificar dados do MongoDB: %v", err), http.StatusInternalServerError)
-			return
+	// Inscreve-se no tópico e consome mensagens
+	msgs, err := ch.Consume(
+		queueName, // nome da fila
+		"",        // consumer
+		true,      // auto-ack
+		false,     // exclusivo
+		false,     // no-local
+		false,     // no-wait
+		nil,       // argumentos
+	)
+	if err != nil {
+		log.Fatalf("Erro ao consumir mensagens do RabbitMQ: %v", err)
+	}
+
+	// Configura o listener de mensagens
+	go func() {
+		for d := range msgs {
+			var ResourceData ResourceData
+			err := json.Unmarshal(d.Body, &ResourceData)
+			if err != nil {
+				log.Printf("Erro ao decodificar mensagem JSON: %v", err)
+				continue
+			}
+
+			// Insere os dados no MongoDB
+			_, err = collection.InsertOne(ctx, bson.M{
+				"sensor_id": ResourceData.SensorID,
+				"data":      ResourceData.Data,
+			})
+			if err != nil {
+				log.Printf("Erro ao inserir dados no MongoDB: %v", err)
+				continue
+			}
+			log.Printf("Dados armazenados para sensor_id: %s. Dados: %s", ResourceData.SensorID, ResourceData.Data)
 		}
-		results = append(results, result)
-	}
+	}()
 
-	// Verifica se não encontrou dados
-	if len(results) == 0 {
-		http.Error(w, "Nenhum dado encontrado para este sensor", http.StatusNotFound)
-		return
-	}
-
-	// Codifica os resultados em JSON e envia como resposta
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(results)
+	// Aguarda por interrupções para encerrar o serviço
+	log.Println("Aguardando mensagens. Pressione Ctrl+C para sair")
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+	<-quit
+	log.Println("Encerrando o serviço")
 }
