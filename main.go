@@ -16,13 +16,9 @@ import (
 
 var collection *mongo.Collection
 
-// SensorData é a estrutura do JSON que será recebida e armazenada (sem Lat/Lon)
-type SensorData struct {
-	Data struct {
-		Temperature float64 `json:"temperature"`
-		Humidity    float64 `json:"humidity"`
-		Timestamp   string  `json:"timestamp"`
-	} `json:"data"`
+// ResourceData é a estrutura do JSON que será recebida e armazenada
+type ResourceData struct {
+	Data string `json:"data"`
 }
 
 func main() {
@@ -78,7 +74,7 @@ func apiHandler(w http.ResponseWriter, r *http.Request) {
 
 // handlePostData lida com o envio de dados dos sensores
 func handlePostData(uuid string, w http.ResponseWriter, r *http.Request) {
-	var data SensorData
+	var data ResourceData
 
 	// Decodifica o JSON recebido
 	err := json.NewDecoder(r.Body).Decode(&data)
@@ -112,9 +108,9 @@ func handleGetData(uuid string, w http.ResponseWriter, r *http.Request) {
 	}
 	defer cursor.Close(context.Background())
 
-	var results []SensorData
+	var results []ResourceData
 	for cursor.Next(context.Background()) {
-		var result SensorData
+		var result ResourceData
 		err := cursor.Decode(&result)
 		if err != nil {
 			http.Error(w, fmt.Sprintf("Erro ao decodificar dados do MongoDB: %v", err), http.StatusInternalServerError)
