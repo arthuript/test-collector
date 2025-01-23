@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/streadway/amqp"
 	"go.mongodb.org/mongo-driver/bson"
@@ -47,8 +48,10 @@ func main() {
 	// Conecta ao RabbitMQ
 	rabbitMQURL := "amqp://guest:guest@rabbitmq:5672/"
 	conn, err := amqp.Dial(rabbitMQURL)
-	if err != nil {
-		log.Fatalf("Erro ao conectar ao RabbitMQ: %v", err)
+	for err != nil {
+		log.Println("Erro ao conectar ao RabbitMQ, tentando novamente daqui 2 segundos: %s", err)
+		time.Sleep(2000 * time.Millisecond)
+		conn, err = amqp.Dial(rabbitMQURL)
 	}
 	defer conn.Close()
 	log.Println("Conectado ao RabbitMQ com sucesso")
