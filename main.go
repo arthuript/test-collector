@@ -20,7 +20,7 @@ var collection *mongo.Collection
 
 // ResourceData é a estrutura do JSON que será recebida e armazenada
 type ResourceData struct {
-	SensorID string                 `json:"sensor_id"`
+	SensorID string                 `json:"uuid"`
 	Data     map[string]interface{} `json:"data"`
 }
 
