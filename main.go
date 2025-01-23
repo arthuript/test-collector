@@ -62,10 +62,24 @@ func main() {
 		log.Fatalf("Erro ao abrir um canal no RabbitMQ: %v", err)
 	}
 	defer ch.Close()
+	
+	// Declaração do exchange onde o tópico será publicado
+	err = ch.ExchangeDeclare(
+		"data_stream", // nome do exchange
+		"topic",       // tipo de exchange
+		true,          // durável
+		false,         // auto-delete
+		false,         // interno
+		false,         // exclusivo
+		nil,           // argumentos
+	)
+	if err != nil {
+		log.Fatalf("Erro ao declarar exchange: %s", err)
+	}
 
 	// Declara a fila de mensagens (tópico)
-	queueName := "data_stream"
-	_, err = ch.QueueDeclare(
+	queueName := ""
+	queue, err := ch.QueueDeclare(
 		queueName, // nome da fila
 		true,      // durável
 		false,     // auto-delete
@@ -76,6 +90,19 @@ func main() {
 	if err != nil {
 		log.Fatalf("Erro ao declarar a fila no RabbitMQ: %v", err)
 	}
+	// Fazer o binding da fila ao exchange com uma routing key
+	routingKey := "topic" // Deve coincidir com a chave usada pelo produtor
+	err = ch.QueueBind(
+		queue.Name,    // nome da fila
+		routingKey,    // routing key
+		"data_stream", // nome do exchange
+		false,         // no-wait
+		nil,           // argumentos adicionais
+	)
+	if err != nil {
+	    log.Fatalf("Erro ao fazer o binding da fila: %v", err)
+	}
+
 
 	// Inscreve-se no tópico e consome mensagens
 	msgs, err := ch.Consume(
@@ -94,6 +121,7 @@ func main() {
 	// Configura o listener de mensagens
 	go func() {
 		for d := range msgs {
+			log.Println("Nova mensagem:", string(d.Body))
 			var ResourceData ResourceData
 			err := json.Unmarshal(d.Body, &ResourceData)
 			if err != nil {
