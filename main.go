@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"log"
 	"os"
+	"net/http"
 	"os/signal"
 	"syscall"
 	"time"
@@ -23,6 +24,38 @@ type ResourceData struct {
 	SensorID string                 `json:"uuid"`
 	Data     map[string]interface{} `json:"data"`
 }
+
+
+// HTTP handler to return all stored data
+func handleGetData(mongoCollection *mongo.Collection) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+
+		// Fetch all documents from MongoDB
+		cursor, err := mongoCollection.Find(context.TODO(), bson.M{})
+		if err != nil {
+			http.Error(w, "Failed to fetch data from MongoDB", http.StatusInternalServerError)
+			log.Printf("MongoDB find error: %v", err)
+			return
+		}
+		defer cursor.Close(context.TODO())
+
+		// Collect all documents
+		var results []bson.M
+		if err = cursor.All(context.TODO(), &results); err != nil {
+			http.Error(w, "Failed to parse data from MongoDB", http.StatusInternalServerError)
+			log.Printf("MongoDB cursor error: %v", err)
+			return
+		}
+
+		// Write the JSON response
+		if err := json.NewEncoder(w).Encode(results); err != nil {
+			http.Error(w, "Failed to encode response", http.StatusInternalServerError)
+			log.Printf("JSON encoding error: %v", err)
+		}
+	}
+}
+
 
 func main() {
 	// Configura o cliente MongoDB
@@ -118,6 +151,16 @@ func main() {
 		log.Fatalf("Erro ao consumir mensagens do RabbitMQ: %v", err)
 	}
 
+
+	// Start HTTP server
+	http.HandleFunc("/data", handleGetData(collection))
+	go func() {
+		log.Println("HTTP server listening on :8080")
+		if err := http.ListenAndServe(":8080", nil); err != nil {
+			log.Fatalf("Failed to start HTTP server: %v", err)
+		}
+	}()
+
 	// Configura o listener de mensagens
 	go func() {
 		for d := range msgs {
@@ -131,8 +174,8 @@ func main() {
 
 			// Insere os dados no MongoDB
 			_, err = collection.InsertOne(ctx, bson.M{
-				"sensor_id": ResourceData.SensorID,
-				"data":      ResourceData.Data,
+				"uuid": ResourceData.SensorID,
+				"data": ResourceData.Data,
 			})
 			if err != nil {
 				log.Printf("Erro ao inserir dados no MongoDB: %v", err)
