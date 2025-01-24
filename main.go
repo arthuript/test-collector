@@ -9,6 +9,7 @@ import (
 	"os/signal"
 	"syscall"
 	"time"
+	"strings"
 
 	"github.com/streadway/amqp"
 	"go.mongodb.org/mongo-driver/bson"
@@ -26,8 +27,8 @@ type ResourceData struct {
 }
 
 
-// HTTP handler to return all stored data
-func handleGetData(mongoCollection *mongo.Collection) http.HandlerFunc {
+// Handle POST /resources/data - Get historical data of all resources
+func handleGetAllResourcesData(mongoCollection *mongo.Collection) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 
@@ -40,22 +41,71 @@ func handleGetData(mongoCollection *mongo.Collection) http.HandlerFunc {
 		}
 		defer cursor.Close(context.TODO())
 
-		// Collect all documents
+		// Collect the results into a slice
 		var results []bson.M
-		if err = cursor.All(context.TODO(), &results); err != nil {
-			http.Error(w, "Failed to parse data from MongoDB", http.StatusInternalServerError)
-			log.Printf("MongoDB cursor error: %v", err)
+		if err := cursor.All(context.TODO(), &results); err != nil {
+			http.Error(w, "Error processing MongoDB data", http.StatusInternalServerError)
+			log.Printf("Cursor iteration error: %v", err)
 			return
 		}
 
-		// Write the JSON response
-		if err := json.NewEncoder(w).Encode(results); err != nil {
-			http.Error(w, "Failed to encode response", http.StatusInternalServerError)
-			log.Printf("JSON encoding error: %v", err)
+		// Serialize the results to JSON
+		response, err := json.Marshal(results)
+		if err != nil {
+			http.Error(w, "Error serializing response", http.StatusInternalServerError)
+			log.Printf("JSON serialization error: %v", err)
+			return
 		}
+
+		// Send the JSON to the client
+		w.Write(response)
 	}
 }
 
+// Handle POST /resources/{uuid}/data - Get historical data of a specific resource
+func handleGetResourceData(mongoCollection *mongo.Collection) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+
+		// Extract the UUID from the URL
+		parts := strings.Split(r.URL.Path, "/")
+		if len(parts) < 3 {
+			http.Error(w, "Invalid request URL", http.StatusBadRequest)
+			return
+		}
+		uuid := parts[2]
+
+		// Query MongoDB for documents matching the UUID
+		filter := bson.M{"uuid": uuid}
+		cursor, err := mongoCollection.Find(context.TODO(), filter)
+		if err != nil {
+			http.Error(w, "Error fetching data from MongoDB", http.StatusInternalServerError)
+			log.Printf("MongoDB find error: %v", err)
+			return
+		}
+		defer cursor.Close(context.TODO())
+
+		// Collect the results into a slice
+		var results []ResourceData
+		if err := cursor.All(context.TODO(), &results); err != nil {
+			http.Error(w, "Error processing MongoDB data", http.StatusInternalServerError)
+			log.Printf("Cursor iteration error: %v", err)
+			return
+		}
+
+		// Serialize the results to JSON
+		response, err := json.Marshal(results)
+		if err != nil {
+			http.Error(w, "Error serializing response", http.StatusInternalServerError)
+			log.Printf("JSON serialization error: %v", err)
+			return
+		}
+		log.Printf("JSON: %s", response)
+
+		// Send the JSON to the client
+		w.Write(response)
+	}
+}
 
 func main() {
 	// Configura o cliente MongoDB
@@ -153,7 +203,9 @@ func main() {
 
 
 	// Start HTTP server
-	http.HandleFunc("/data", handleGetData(collection))
+	http.HandleFunc("/resources/data", handleGetAllResourcesData(collection))
+	http.HandleFunc("/resources/", handleGetResourceData(collection))
+
 	go func() {
 		log.Println("HTTP server listening on :8080")
 		if err := http.ListenAndServe(":8080", nil); err != nil {
